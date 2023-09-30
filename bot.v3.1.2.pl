@@ -27,9 +27,8 @@
 
 use strict;
 use warnings;
-# use IO::Socket;
+use IO::Socket;
 use IO::Select;
-use IO::Socket::SSL;
 use Data::Dumper;
 use Getopt::Long;
 
@@ -184,11 +183,8 @@ if (! -e $opts{dbfile}) {
 # this is almost silly...
 if ($opts{checkupdates}) {
     print "Checking for updates...\n\n";
-    my $tempsock = IO::Socket::SSL->new(
-        PeerAddr => "jotun.ultrazone.org:443",  # Update port to 443 for HTTPS
-        Timeout  => 15,
-        SSL_verify_mode => 0  # No SSL verification for this example
-    );
+    my $tempsock = IO::Socket::INET->new(PeerAddr=>"jotun.ultrazone.org:80",
+                                         Timeout => 15);
     if ($tempsock) {
         print $tempsock "GET /g7/version.php?version=$version HTTP/1.1\r\n".
                         "Host: jotun.ultrazone.org:80\r\n\r\n";
@@ -228,77 +224,23 @@ CONNECT: # cheese.
 loaddb();
 
 while (!$sock && $conn_tries < 2*@{$opts{servers}}) {
-    my $server_to_connect = $opts{servers}->[0];
-    my $port_to_connect = 6697;  # or whatever port you're using
-    
-    debug("Attempting to connect to Server: $server_to_connect, Port: $port_to_connect");
-    
-    my %sockinfo = (
-        PeerAddr => $server_to_connect,
-        PeerPort => $port_to_connect,
-        Proto    => 'tcp',
-        SSL_verify_mode => 0
-    );
-    
-    if ($opts{localaddr}) {
-        $sockinfo{LocalAddr} = $opts{localaddr};
-        debug("Using LocalAddr: $opts{localaddr}");
-    }
-    
-    $sock = IO::Socket::SSL->new(%sockinfo);
-    
-$sock = IO::Socket::SSL->new(%sockinfo);
-    
-if ($sock) {
-    debug("Successfully connected to $opts{servers}->[0]:6697.");
-
-    # Display SSL certificate information
-    my $issuer  = $sock->peer_certificate("issuer");
-    my $subject = $sock->peer_certificate("subject");
-    my $common_name = $sock->peer_certificate("commonName");
-
-    debug("SSL Certificate Information:");
-    debug("Issuer: $issuer");
-    debug("Subject: $subject");
-    debug("Common Name: $common_name");
-    
-    # Explicitly set the socket to blocking mode
-    $sock->blocking(1);
-    
-    my $read_set = IO::Select->new($sock);
-    if ($read_set->can_read(5)) {
-        my $welcome_msg = "";
-        my $bytes_received = sysread($sock, $welcome_msg, 512);
-        
-        if ($bytes_received) {
-            debug("Received $bytes_received bytes from server: $welcome_msg");
-        } else {
-            debug("Received 0 bytes from server. Something might be wrong.");
-        }
-        
-    } else {
-        debug("No data received from server within 5 seconds.");
-    }
-    
-} else {
-    debug("Failed to connect to $opts{servers}->[0]:6697. Error: $!");
-}
-
-    
+    debug("Connecting to $opts{servers}->[0]...");
+    my %sockinfo = (PeerAddr => $opts{servers}->[0],
+                    PeerPort => 6667);
+    if ($opts{localaddr}) { $sockinfo{LocalAddr} = $opts{localaddr}; }
+    $sock = IO::Socket::INET->new(%sockinfo) or
+        debug("Error: failed to connect: $!\n");
     ++$conn_tries;
-    
     if (!$sock) {
-        debug("Connection attempt failed. Cycling to next server...");
-        push(@{$opts{servers}}, shift(@{$opts{servers}}));
-    } else {
-        debug("Connection established.");
+        # cycle front server to back if connection failed
+        push(@{$opts{servers}},shift(@{$opts{servers}}));
     }
+    else { debug("Connected."); }
 }
 
 if (!$sock) {
-    debug("Too many connection failures. Exhausted server list.");
+    debug("Error: Too many connection failures, exhausted server list.\n",1);
 }
-
 
 $conn_tries=0;
 
@@ -312,9 +254,8 @@ while (1) {
     if (defined($readable)) {
         my $fh = $readable->[0];
         my $buffer2;
-        sysread($fh, $buffer2, 512);  # Using sysread instead of recv
+        $fh->recv($buffer2,512,0);
         if (length($buffer2)) {
-            debug("Received from server: $buffer2");  # Debug statement
             $buffer .= $buffer2;
             while (index($buffer,"\n") != -1) {
                 my $line = substr($buffer,0,index($buffer,"\n")+1);
@@ -323,7 +264,10 @@ while (1) {
             }
         }
         else {
-            debug("No data received. Disconnecting.");  # Debug statement
+            # uh oh, we've been disconnected from the server, possibly before
+            # we've logged in the users in %auto_login. so, we'll set those
+            # users' online flags to 1, rewrite db, and attempt to reconnect
+            # (if that's wanted of us)
             $rps{$_}{online}=1 for keys(%auto_login);
             writedb();
 
@@ -342,9 +286,7 @@ while (1) {
             else { debug("Socket closed; disconnected.",1); }
         }
     }
-    else {
-        debug("Nothing readable. Waiting.");  # Debug statement
-    }
+    else { select(undef,undef,undef,1); }
     if ((time()-$lasttime) >= $opts{self_clock}) { rpcheck(); }
 }
 
@@ -602,17 +544,15 @@ sub parse {
                                 "can idle the longest. As such, talking in ".
                                 "the channel, parting, quitting, and changing ".
                                 "nicks all penalize you.",$usernick);
-if ($opts{phonehome}) {
-    my $tempsock = IO::Socket::SSL->new(
-        PeerAddr => "jotun.ultrazone.org:443",  # Update port to 443 for HTTPS
-        SSL_verify_mode => 0  # No SSL verification for this example
-    );
-    if ($tempsock) {
-        print $tempsock
-            "GET /g7/count.php?new=1 HTTP/1.1\r\n".
-            "Host: jotun.ultrazone.org:443\r\n\r\n";  # Update port to 443
-        sleep(1);
-        close($tempsock);
+                        if ($opts{phonehome}) {
+                            my $tempsock = IO::Socket::INET->new(PeerAddr=>
+                                "jotun.ultrazone.org:80");
+                            if ($tempsock) {
+                                print $tempsock
+                                    "GET /g7/count.php?new=1 HTTP/1.1\r\n".
+                                    "Host: jotun.ultrazone.org:80\r\n\r\n";
+                                sleep(1);
+                                close($tempsock);
                             }
                         }
                     }
@@ -1798,42 +1738,28 @@ sub itemsum {
 }
 
 sub daemonize() {
-    debug("Starting daemonization process...");
-
     # win32 doesn't daemonize (this way?)
     if ($^O eq "MSWin32") {
-        debug("Running on Win32, skipping daemonization.");
+        print debug("Nevermind, this is Win32, no I'm not.")."\n";
         return;
     }
-
     use POSIX 'setsid';
-    debug("Setting SIG{CHLD} to empty subroutine.");
     $SIG{CHLD} = sub { };
-
-    debug("Forking first child...");
     fork() && exit(0); # kill parent
-
-    debug("Creating new session...");
-    POSIX::setsid() || debug("POSIX::setsid() failed: $!", 1);
-
-    debug("Forking second child...");
+    POSIX::setsid() || debug("POSIX::setsid() failed: $!",1);
     $SIG{CHLD} = sub { };
     fork() && exit(0); # kill the parent as the process group leader
-
-#    debug("Redirecting STDIN, STDOUT, STDERR to /dev/null...");
-#    open(STDIN, '/dev/null') || debug("Cannot read /dev/null: $!", 1);
-#    open(STDOUT, '>/dev/null') || debug("Cannot write to /dev/null: $!", 1);
-#    open(STDERR, '>/dev/null') || debug("Cannot write to /dev/null: $!", 1);
-
-    debug("Writing PID to $opts{pidfile}...");
-    open(PIDFILE, ">$opts{pidfile}") || do {
-        debug("Failed to open pid file: $!");
+    $SIG{CHLD} = sub { };
+    open(STDIN,'/dev/null') || debug("Cannot read /dev/null: $!",1);
+    open(STDOUT,'>/dev/null') || debug("Cannot write to /dev/null: $!",1);
+    open(STDERR,'>/dev/null') || debug("Cannot write to /dev/null: $!",1);
+    # write our PID to $opts{pidfile}, or return semi-silently on failure
+    open(PIDFILE,">$opts{pidfile}") || do {
+        debug("Error: failed opening pid file: $!");
         return;
     };
     print PIDFILE $$;
     close(PIDFILE);
-
-    debug("Daemonization complete.");
 }
 
 sub calamity { # suffer a little one
