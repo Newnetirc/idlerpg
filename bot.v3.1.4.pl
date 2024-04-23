@@ -27,7 +27,6 @@
 
 use strict;
 use warnings;
-# use IO::Socket;
 use IO::Select;
 use IO::Socket::SSL;
 use Data::Dumper;
