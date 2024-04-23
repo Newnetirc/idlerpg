@@ -27,6 +27,7 @@
 
 use strict;
 use warnings;
+# use IO::Socket;
 use IO::Select;
 use IO::Socket::SSL;
 use Data::Dumper;
@@ -115,6 +116,7 @@ my %quest = (
 my $rpreport = 0; # constant for reporting top players
 my %prev_online; # user@hosts online on restart, die
 my %auto_login; # users to automatically log back on
+my $auto_login_checked = 0;
 my @bans; # bans auto-set by the bot, saved to be removed after 1 hour
 my $pausemode = 0; # pausemode on/off flag
 my $silentmode = 0; # silent mode 0/1/2/3, see head of file
@@ -183,38 +185,40 @@ if (! -e $opts{dbfile}) {
 # this is almost silly...
 if ($opts{checkupdates}) {
     print "Checking for updates...\n\n";
-    my $tempsock = IO::Socket::INET->new(
-        PeerAddr => "idlerpg.newnet.net:80",
-        Proto => 'tcp',
-        Timeout => 15
+    my $tempsock = IO::Socket::SSL->new(
+        PeerAddr => "idlerpg.newnet.net:443",  # Correct port for HTTPS
+        Timeout  => 15,
+        SSL_verify_mode => 0  # No SSL verification for this example
     );
-
     if ($tempsock) {
-        print $tempsock "GET /version.php?version=$version HTTP/1.1\r\n".
-                        "Host: idlerpg.newnet.net\r\n".
-                        "Connection: close\r\n\r\n";
-
-        local $/ = "\r\n\r\n";  # Read header and body in two parts
-        my $response = <$tempsock>;
-        close($tempsock);
-
-        if ($response =~ /Current version : (\S+)/) {
-            my $server_version = $1;
-            if ($version ne $server_version) {
-                print "There is an update available! Changes include:\n";
-                if ($response =~ /-(.+?)$/m) {
-                    print "$1\n";  # Print each line of changes
+        print $tempsock "GET /version.php?version=$version HTTP/1.1\r\n" .
+                        "Host: idlerpg.newnet.net\r\n" .
+                        "Connection: close\r\n\r\n";  # Ensure to close the connection
+        my($line, $newversion);
+        while ($line = <$tempsock>) {
+            chomp($line);
+            next unless $line;  # Skip empty lines
+            if ($line =~ /^Current version : (\S+)/) {
+                if ($version ne $1) {
+                    print "There is an update available! Changes include:\n";
+                    $newversion = 1;
+                } else {
+                    print "You are running the latest version (v$1).\n";
+                    close($tempsock);
+                    last;
                 }
-            } else {
-                print "You are running the latest version (v$server_version).\n";
-            }
-            if ($response =~ /URL: (.+)$/m) {
+            } elsif ($newversion && $line =~ /^(  -? .+)/) {
+                print "$1\n";  # Print update details
+            } elsif ($newversion && $line =~ /^URL: (.+)/) {
                 print "\nGet the newest version from $1!\n";
+                close($tempsock);
+                last;
             }
         }
     } else {
-        print "Could not connect to update server.\n";
+        print "Could not connect to update server.\n";  # Improved error message
     }
+}
 
 print "\n".debug("Becoming a daemon...")."\n";
 daemonize();
@@ -348,6 +352,7 @@ while (1) {
 
 
 sub parse {
+    my $auto_login_checked = 0;
     my($in) = shift;
     $inbytes += length($in); # increase parsed byte count
     $in =~ s/[\r\n]//g; # strip all \r and \n
@@ -436,38 +441,43 @@ elsif ($arg[1] eq 'join') {
         sts("JOIN $opts{botchan}");
         $opts{botchan} =~ s/ .*//; # strip channel key if present
     }
-    elsif ($arg[1] eq '315') {
-        # 315 is /WHO end. report who we automagically signed online iff it will
-        # print < 1k of text
-        if (keys(%auto_login)) {
-            # not a true measure of size, but easy
-            if (length("%auto_login") < 1024 && $opts{senduserlist}) {
-                chanmsg(scalar(keys(%auto_login))." users matching ".
-                        scalar(keys(%prev_online))." hosts automatically ".
-                        "logged in; accounts: ".join(", ",keys(%auto_login)));
+
+elsif ($arg[1] eq '315') {
+    if (%auto_login) {
+        if (keys %auto_login) {
+            my $users_logged_in = join(", ", keys %auto_login);
+            if (length($users_logged_in) < 1024 && $opts{senduserlist}) {
+                chanmsg(scalar(keys(%auto_login)) . " users matching " .
+                        scalar(keys(%prev_online)) . " hosts automatically " .
+                        "logged in; accounts: " . $users_logged_in);
+            } else {
+                chanmsg(scalar(keys(%auto_login)) . " users matching " .
+                        scalar(keys(%prev_online)) . " hosts automatically logged in.");
             }
-            else {
-                chanmsg(scalar(keys(%auto_login))." users matching ".
-                        scalar(keys(%prev_online))." hosts automatically ".
-                        "logged in.");
-            }
-            if ($opts{voiceonlogin}) {
-                my @vnicks = map { $rps{$_}{nick} } keys(%auto_login);
-                while (@vnicks) {
-                    sts("MODE $opts{botchan} +".
-                        ('v' x $opts{modesperline})." ".
-                        join(" ",@vnicks[0..$opts{modesperline}-1]));
-                    splice(@vnicks,0,$opts{modesperline});
-                }
-            }
+
+if ($opts{voiceonlogin}) {
+    my @vnicks = map { $rps{$_}{nick} } keys %auto_login;
+    while (@vnicks) {
+        sts("MODE $opts{botchan} +" .
+            ('v' x ($opts{modesperline} > @vnicks ? @vnicks : $opts{modesperline})) .
+            " " . join(" ", splice(@vnicks, 0, $opts{modesperline})));
+    }
+}
+            undef %auto_login;
+            undef %prev_online;
         }
-        else { chanmsg("0 users qualified for auto login."); }
-        undef(%prev_online);
-        undef(%auto_login);
+    } else {
+        if (!$auto_login_checked) {
+            chanmsg("0 users qualified for auto login.");
+            $auto_login_checked = 1;
+        }
     }
-    elsif ($arg[1] eq '005') {
-        if ("@arg" =~ /MODES=(\d+)/) { $opts{modesperline}=$1; }
+}
+elsif ($arg[1] eq '005') {
+    if ("@arg" =~ /MODES=(\d+)/) {
+        $opts{modesperline} = $1;
     }
+}
     elsif ($arg[1] eq '352') {
         my $user;
         # 352 is one line of /WHO. check that the nick!user@host exists as a key
