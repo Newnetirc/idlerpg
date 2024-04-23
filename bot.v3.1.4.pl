@@ -1,5 +1,5 @@
 #!/usr/local/bin/perl
-# irpg bot v3.1.3 by jotun, jotun@idlerpg.net, et al. See http://idlerpg.net/
+# irpg bot v3.1.4 by jotun, jotun@idlerpg.net, et al. See http://idlerpg.net/
 #
 # Some code within this file was written by authors other than myself. As such,
 # distributing this code or distributing modified versions of this code is
@@ -37,7 +37,7 @@ my %opts;
 
 readconfig();
 
-my $version = "3.1.3";
+my $version = "3.1.4";
 
 # command line overrides .irpg.conf
 GetOptions(\%opts,
