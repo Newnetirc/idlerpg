@@ -184,39 +184,38 @@ if (! -e $opts{dbfile}) {
 # this is almost silly...
 if ($opts{checkupdates}) {
     print "Checking for updates...\n\n";
-    my $tempsock = IO::Socket::SSL->new(
-        PeerAddr => "jotun.ultrazone.org:443",  # Update port to 443 for HTTPS
-        Timeout  => 15,
-        SSL_verify_mode => 0  # No SSL verification for this example
+    my $tempsock = IO::Socket::INET->new(
+        PeerAddr => "idlerpg.newnet.net:80",
+        Proto => 'tcp',
+        Timeout => 15
     );
+
     if ($tempsock) {
-        print $tempsock "GET /g7/version.php?version=$version HTTP/1.1\r\n".
-                        "Host: jotun.ultrazone.org:80\r\n\r\n";
-        my($line,$newversion);
-        while ($line=<$tempsock>) {
-            chomp($line);
-            next() unless $line;
-            if ($line =~ /^Current version : (\S+)/) {
-                if ($version ne $1) {
-                    print "There is an update available! Changes include:\n";
-                    $newversion=1;
+        print $tempsock "GET /version.php?version=$version HTTP/1.1\r\n".
+                        "Host: idlerpg.newnet.net\r\n".
+                        "Connection: close\r\n\r\n";
+
+        local $/ = "\r\n\r\n";  # Read header and body in two parts
+        my $response = <$tempsock>;
+        close($tempsock);
+
+        if ($response =~ /Current version : (\S+)/) {
+            my $server_version = $1;
+            if ($version ne $server_version) {
+                print "There is an update available! Changes include:\n";
+                if ($response =~ /-(.+?)$/m) {
+                    print "$1\n";  # Print each line of changes
                 }
-                else {
-                    print "You are running the latest version (v$1).\n";
-                    close($tempsock);
-                    last();
-                }
+            } else {
+                print "You are running the latest version (v$server_version).\n";
             }
-            elsif ($newversion && $line =~ /^(  -? .+)/) { print "$1\n"; }
-            elsif ($newversion && $line =~ /^URL: (.+)/) {
+            if ($response =~ /URL: (.+)$/m) {
                 print "\nGet the newest version from $1!\n";
-                close($tempsock);
-                last();
             }
         }
+    } else {
+        print "Could not connect to update server.\n";
     }
-    else { print debug("Could not connect to update server.")."\n"; }
-}
 
 print "\n".debug("Becoming a daemon...")."\n";
 daemonize();
@@ -373,19 +372,23 @@ sub parse {
         $opts{botnick} .= 0;
         sts("NICK $opts{botnick}");
     }
-    elsif ($arg[1] eq 'join') {
-        # %onchan holds time user joined channel. used for the advertisement ban
-        $onchan{$usernick}=time();
-        if ($opts{'detectsplits'} && exists($split{substr($arg[0],1)})) {
-            delete($split{substr($arg[0],1)});
-        }
-        elsif ($opts{botnick} eq $usernick) {
-            sts("WHO $opts{botchan}");
-            (my $opcmd = $opts{botopcmd}) =~ s/%botnick%/$opts{botnick}/eg;
-            sts($opcmd);
-            $lasttime = time(); # start rpcheck()
-        }
+elsif ($arg[1] eq 'join') {
+    # %onchan holds time user joined channel. used for the advertisement ban
+    $onchan{$usernick} = time();
+    if ($opts{'detectsplits'} && exists($split{substr($arg[0],1)})) {
+        delete($split{substr($arg[0],1)});
     }
+    elsif ($opts{botnick} eq $usernick) {
+        # Split the channel names by commas and send a WHO command for each
+        my @channels = split(',', $opts{botchan});
+        for my $channel (@channels) {
+            sts("WHO $channel");
+        }
+        (my $opcmd = $opts{botopcmd}) =~ s/%botnick%/$opts{botnick}/eg;
+        sts($opcmd);
+        $lasttime = time(); # start rpcheck()
+    }
+}
     elsif ($arg[1] eq 'quit') {
         # if we see our nick come open, grab it (skipping queue)
         if ($usernick eq $primnick) { sts("NICK $primnick",1); }
